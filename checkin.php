@@ -1,231 +1,260 @@
 <?php
-// checkin.php
 require_once 'config.php';
 require_once 'auth.php';
 
-$mensagemWhatsApp = null;  // Mensagem para WhatsApp
-$mensagemSistema  = null;  // Alertas gerais
+$mensagemSistema  = '';
+$mensagemWhatsApp = '';
+$erro             = '';
 
-// PROCESSAMENTO DOS FORMULÁRIOS
+/*
+ |---------------------------------------------------------
+ | AÇÕES: NOVO CHECK-IN / CHECK-OUT
+ |---------------------------------------------------------
+*/
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $action = isset($_POST['action']) ? $_POST['action'] : '';
+    $action = $_POST['action'] ?? '';
 
-    // CHECK-IN
-    if ($action === 'checkin') {
-        $profissional_id = (int)(isset($_POST['profissional_id']) ? $_POST['profissional_id'] : 0);
-        $sala_id         = (int)(isset($_POST['sala_id']) ? $_POST['sala_id'] : 0);
-        $data            = trim(isset($_POST['data']) ? $_POST['data'] : '');
-        $hora_checkin    = trim(isset($_POST['hora_checkin']) ? $_POST['hora_checkin'] : '');
+    // NOVO CHECK-IN
+    if ($action === 'novo_checkin') {
+        $profissionalId = (int)($_POST['profissional_id'] ?? 0);
+        $salaId         = (int)($_POST['sala_id'] ?? 0);
+        $data           = trim($_POST['data'] ?? '');
+        $horaCheckin    = trim($_POST['hora_checkin'] ?? '');
 
-        if ($data === '') {
-            $data = date('Y-m-d');
-        }
-
-        if ($profissional_id <= 0 || $sala_id <= 0 || $hora_checkin === '') {
-            $mensagemSistema = "Erro: selecione o profissional, a sala e informe o horário de check-in.";
+        if ($profissionalId <= 0 || $salaId <= 0) {
+            $erro = 'Selecione o profissional e a sala.';
         } else {
-            // Buscar nome do profissional
-            $stmtP = $pdo->prepare("SELECT nome FROM profissionais WHERE id = :id AND ativo = 1");
-            $stmtP->execute([':id' => $profissional_id]);
-            $profRow = $stmtP->fetch(PDO::FETCH_ASSOC);
+            if ($data === '') {
+                $data = date('Y-m-d');
+            }
+            if ($horaCheckin === '') {
+                $horaCheckin = date('H:i');
+            }
 
-            // Buscar nome da sala
-            $stmtS = $pdo->prepare("SELECT nome FROM salas WHERE id = :id AND ativo = 1");
-            $stmtS->execute([':id' => $sala_id]);
-            $salaRow = $stmtS->fetch(PDO::FETCH_ASSOC);
+            // Busca nome do profissional
+            $stmt = $pdo->prepare("SELECT nome FROM profissionais WHERE id = :id");
+            $stmt->execute([':id' => $profissionalId]);
+            $rowProf = $stmt->fetch(PDO::FETCH_ASSOC);
+            $nomeProfissional = $rowProf['nome'] ?? '';
 
-            if (!$profRow || !$salaRow) {
-                $mensagemSistema = "Erro: profissional ou sala inválidos.";
+            // Busca nome da sala
+            $stmt = $pdo->prepare("SELECT nome FROM salas WHERE id = :id");
+            $stmt->execute([':id' => $salaId]);
+            $rowSala = $stmt->fetch(PDO::FETCH_ASSOC);
+            $nomeSala = $rowSala['nome'] ?? '';
+
+            if ($nomeProfissional === '' || $nomeSala === '') {
+                $erro = 'Erro ao localizar o profissional ou a sala.';
             } else {
-                $profissional = $profRow['nome'];
-                $sala         = $salaRow['nome'];
-
+                // Insere o registro
                 $stmt = $pdo->prepare("
                     INSERT INTO registros (profissional, sala, data, hora_checkin)
                     VALUES (:profissional, :sala, :data, :hora_checkin)
                 ");
                 $stmt->execute([
-                    ':profissional' => $profissional,
-                    ':sala'         => $sala,
+                    ':profissional' => $nomeProfissional,
+                    ':sala'         => $nomeSala,
                     ':data'         => $data,
-                    ':hora_checkin' => $hora_checkin
+                    ':hora_checkin' => $horaCheckin,
                 ]);
 
-                $mensagemSistema = "Check-in registrado com sucesso para {$profissional} na sala {$sala}.";
+                $mensagemSistema = "Check-in registrado com sucesso para {$nomeProfissional} na sala {$nomeSala}.";
+
+                // Monta mensagem para WhatsApp (CHECK-IN)
+                $dataBR = DateTime::createFromFormat('Y-m-d', $data);
+                $dataFormatada = $dataBR ? $dataBR->format('d/m/Y') : $data;
+
+                $mensagemWhatsApp  = "Olá, {$nomeProfissional}! Seu check-in para uso da sala {$nomeSala} foi registrado:\n";
+                $mensagemWhatsApp .= "Data: {$dataFormatada}\n";
+                $mensagemWhatsApp .= "Check-in: {$horaCheckin}.";
             }
         }
+    }
 
     // CHECK-OUT
-    } elseif ($action === 'checkout') {
-        $id            = (int)(isset($_POST['id']) ? $_POST['id'] : 0);
-        $hora_checkout = trim(isset($_POST['hora_checkout']) ? $_POST['hora_checkout'] : '');
+    if ($action === 'checkout') {
+        $registroId   = (int)($_POST['registro_id'] ?? 0);
+        $horaCheckout = trim($_POST['hora_checkout'] ?? '');
 
-        if ($hora_checkout === '') {
-            $hora_checkout = date('H:i'); // horário atual
-        }
-
-        $stmt = $pdo->prepare("SELECT * FROM registros WHERE id = :id");
-        $stmt->execute([':id' => $id]);
-        $registro = $stmt->fetch(PDO::FETCH_ASSOC);
-
-        if (!$registro) {
-            $mensagemSistema = "Registro não encontrado.";
-        } elseif (!empty($registro['hora_checkout'])) {
-            $mensagemSistema = "Este registro já possui check-out.";
+        if ($registroId <= 0) {
+            $erro = 'Registro inválido para check-out.';
         } else {
-            $data         = $registro['data'];
-            $hora_checkin = $registro['hora_checkin'];
-            $profissional = $registro['profissional'];
-            $sala         = $registro['sala'];
+            if ($horaCheckout === '') {
+                $horaCheckout = date('H:i');
+            }
 
-            $horasDecimais   = calcularHorasDecimais($data, $hora_checkin, $hora_checkout);
-            $horasFormatadas = number_format($horasDecimais, 2, ',', '');
-            $dataBR          = DateTime::createFromFormat('Y-m-d', $data)->format('d/m/Y');
-
-            $mensagemWhatsApp = "Olá, {$profissional}! Segue o registro de uso da sala {$sala}:\n"
-                . "Data: {$dataBR}\n"
-                . "Check-in: {$hora_checkin}\n"
-                . "Check-out: {$hora_checkout}\n"
-                . "Tempo total utilizado: {$horasFormatadas} horas.";
-
-            $stmtUpdate = $pdo->prepare("
-                UPDATE registros
-                SET hora_checkout = :hora_checkout,
-                    total_horas   = :total_horas,
-                    mensagem      = :mensagem
+            // Busca o registro
+            $stmt = $pdo->prepare("
+                SELECT id, profissional, sala, data, hora_checkin, hora_checkout, total_horas
+                FROM registros
                 WHERE id = :id
             ");
-            $stmtUpdate->execute([
-                ':hora_checkout' => $hora_checkout,
-                ':total_horas'   => $horasDecimais,
-                ':mensagem'      => $mensagemWhatsApp,
-                ':id'            => $id
-            ]);
+            $stmt->execute([':id' => $registroId]);
+            $registro = $stmt->fetch(PDO::FETCH_ASSOC);
 
-            $mensagemSistema = "Check-out registrado com sucesso para {$profissional}.";
+            if (!$registro) {
+                $erro = 'Registro não encontrado.';
+            } elseif (!empty($registro['hora_checkout'])) {
+                $erro = 'Este registro já possui check-out.';
+            } else {
+                // Calcula horas decimais usando função do config.php
+                $totalHoras = calcularHorasDecimais(
+                    $registro['data'],
+                    $registro['hora_checkin'],
+                    $horaCheckout
+                );
+
+                $stmt = $pdo->prepare("
+                    UPDATE registros
+                    SET hora_checkout = :hora_checkout,
+                        total_horas   = :total_horas
+                    WHERE id = :id
+                ");
+                $stmt->execute([
+                    ':hora_checkout' => $horaCheckout,
+                    ':total_horas'   => $totalHoras,
+                    ':id'            => $registroId,
+                ]);
+
+                $mensagemSistema = "Check-out registrado com sucesso para {$registro['profissional']}.";
+
+                // Monta mensagem para WhatsApp (CHECK-OUT)
+                $dataBR = DateTime::createFromFormat('Y-m-d', $registro['data']);
+                $dataFormatada = $dataBR ? $dataBR->format('d/m/Y') : $registro['data'];
+
+                $mensagemWhatsApp  = "Olá, {$registro['profissional']}! Segue o registro de uso da sala {$registro['sala']}:\n";
+                $mensagemWhatsApp .= "Data: {$dataFormatada}\n";
+                $mensagemWhatsApp .= "Check-in: {$registro['hora_checkin']}\n";
+                $mensagemWhatsApp .= "Check-out: {$horaCheckout}\n";
+                $mensagemWhatsApp .= "Tempo total utilizado: " . number_format((float)$totalHoras, 2, ',', '') . " horas.";
+            }
         }
     }
 }
 
-// BUSCAS PARA EXIBIÇÃO
+/*
+ |---------------------------------------------------------
+ | BUSCAS: PROFISSIONAIS, SALAS, ABERTOS, ÚLTIMOS FINALIZADOS
+ |---------------------------------------------------------
+*/
 
-// Dropdowns
-$stmtProf = $pdo->query("SELECT * FROM profissionais WHERE ativo = 1 ORDER BY nome ASC");
-$profissionais = $stmtProf->fetchAll(PDO::FETCH_ASSOC);
+// Profissionais e salas para o dropdown
+$stmt = $pdo->query("SELECT id, nome FROM profissionais WHERE ativo = 1 ORDER BY nome ASC");
+$profissionais = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-$stmtSalas = $pdo->query("SELECT * FROM salas WHERE ativo = 1 ORDER BY nome ASC");
-$salas = $stmtSalas->fetchAll(PDO::FETCH_ASSOC);
+$stmt = $pdo->query("SELECT id, nome FROM salas WHERE ativo = 1 ORDER BY nome ASC");
+$salas = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-// Check-ins em aberto
-$stmtAbertos = $pdo->query("
-    SELECT * FROM registros
+// Check-ins em aberto (sem check-out)
+$stmt = $pdo->query("
+    SELECT id, profissional, sala, data, hora_checkin
+    FROM registros
     WHERE hora_checkout IS NULL
     ORDER BY data DESC, hora_checkin DESC
 ");
-$registrosAbertos = $stmtAbertos->fetchAll(PDO::FETCH_ASSOC);
+$abertos = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-// Paginação dos registros finalizados (grupos de 5)
-$itensPorPagina = 5;
-$paginaAtual = isset($_GET['page_finalizados']) ? (int)$_GET['page_finalizados'] : 1;
-if ($paginaAtual < 1) {
-    $paginaAtual = 1;
-}
-$offset = ($paginaAtual - 1) * $itensPorPagina;
+// Últimos registros finalizados (pagina de 5 em 5)
+$porPagina = 5;
+$pagina = max(1, (int)($_GET['page'] ?? 1));
+$offset = ($pagina - 1) * $porPagina;
 
-// Total de registros finalizados
-$stmtFinalizadosCount = $pdo->query("SELECT COUNT(*) FROM registros WHERE hora_checkout IS NOT NULL");
-$totalFinalizados = (int)$stmtFinalizadosCount->fetchColumn();
-$totalPaginas = $totalFinalizados > 0 ? (int)ceil($totalFinalizados / $itensPorPagina) : 1;
+// total para paginação
+$stmt = $pdo->query("SELECT COUNT(*) FROM registros WHERE hora_checkout IS NOT NULL");
+$totalFinalizados = (int)$stmt->fetchColumn();
+$totalPaginas = max(1, (int)ceil($totalFinalizados / $porPagina));
 
-$temPaginaAnterior = $paginaAtual > 1;
-$temProximaPagina  = $paginaAtual < $totalPaginas;
-
-// Garantir que limit/offset são inteiros na query
-$limit     = (int)$itensPorPagina;
-$offsetInt = (int)$offset;
-
-// Buscar o grupo atual
-$sqlFinalizados = "
-    SELECT * FROM registros
+$stmt = $pdo->prepare("
+    SELECT id, profissional, sala, data, hora_checkin, hora_checkout, total_horas
+    FROM registros
     WHERE hora_checkout IS NOT NULL
     ORDER BY data DESC, hora_checkin DESC
-    LIMIT $limit OFFSET $offsetInt
-";
-$stmtFinalizados = $pdo->query($sqlFinalizados);
-$registrosFinalizados = $stmtFinalizados->fetchAll(PDO::FETCH_ASSOC);
+    LIMIT :limite OFFSET :offset
+");
+$stmt->bindValue(':limite', $porPagina, PDO::PARAM_INT);
+$stmt->bindValue(':offset', $offset, PDO::PARAM_INT);
+$stmt->execute();
+$finalizados = $stmt->fetchAll(PDO::FETCH_ASSOC);
 ?>
 <!DOCTYPE html>
 <html lang="pt-br">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Check-in de Salas - Espaço Vital Clínica</title>
+    <title>Check-in - Espaço Vital Clínica</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <?php include 'header.php'; ?>
 <div class="container">
     <h1>Controle de Check-in / Check-out de Salas</h1>
+
     <?php include 'user_info.php'; ?>
 
-    <?php if ($mensagemSistema !== null): ?>
-        <div class="msg-alerta">
+    <?php if ($mensagemSistema): ?>
+        <div class="msg-alerta" style="background-color:#fffbeb;border-color:#fbbf24;color:#92400e;">
             <?= htmlspecialchars($mensagemSistema) ?>
         </div>
     <?php endif; ?>
 
-    <?php if ($mensagemWhatsApp !== null): ?>
+    <?php if ($erro): ?>
+        <div class="msg-alerta">
+            <?= htmlspecialchars($erro) ?>
+        </div>
+    <?php endif; ?>
+
+    <?php if ($mensagemWhatsApp): ?>
         <div class="card">
             <h2>Mensagem para enviar ao profissional</h2>
-            <p class="info">Copie e cole essa mensagem no WhatsApp do profissional:</p>
-            <textarea rows="5" readonly onclick="this.select();"><?= htmlspecialchars($mensagemWhatsApp) ?></textarea>
+            <p>Copie e cole essa mensagem no WhatsApp do profissional:</p>
+            <textarea readonly rows="5"><?= htmlspecialchars($mensagemWhatsApp) ?></textarea>
         </div>
     <?php endif; ?>
 
     <!-- NOVO CHECK-IN -->
     <div class="card">
-        <h2>Novo Check-in</h2>
+        <h2>Novo check-in</h2>
+        <form method="post" class="flex-row">
+            <input type="hidden" name="action" value="novo_checkin">
 
-        <?php if (empty($profissionais) || empty($salas)): ?>
-            <p class="info">
-                Para registrar um check-in, primeiro cadastre pelo menos um <strong>profissional</strong> e uma <strong>sala</strong> na área de
-                <a class="btn-link" href="registros.php">Admin &gt; Registros</a>.
-            </p>
-        <?php else: ?>
-            <form method="post">
-                <input type="hidden" name="action" value="checkin">
-
+            <div class="flex-col">
                 <label for="profissional_id">Profissional</label>
                 <select id="profissional_id" name="profissional_id" required>
-                    <option value="">Selecione um profissional...</option>
+                    <option value="">Selecione</option>
                     <?php foreach ($profissionais as $p): ?>
-                        <option value="<?= (int)$p['id'] ?>"><?= htmlspecialchars($p['nome']) ?></option>
+                        <option value="<?= (int)$p['id'] ?>">
+                            <?= htmlspecialchars($p['nome']) ?>
+                        </option>
                     <?php endforeach; ?>
                 </select>
 
                 <label for="sala_id">Sala</label>
                 <select id="sala_id" name="sala_id" required>
-                    <option value="">Selecione uma sala...</option>
+                    <option value="">Selecione</option>
                     <?php foreach ($salas as $s): ?>
-                        <option value="<?= (int)$s['id'] ?>"><?= htmlspecialchars($s['nome']) ?></option>
+                        <option value="<?= (int)$s['id'] ?>">
+                            <?= htmlspecialchars($s['nome']) ?>
+                        </option>
                     <?php endforeach; ?>
                 </select>
+            </div>
 
+            <div class="flex-col">
                 <label for="data">Data</label>
                 <input type="date" id="data" name="data" value="<?= date('Y-m-d'); ?>">
 
-                <label for="hora_checkin">Horário de Check-in</label>
-                <input type="time" id="hora_checkin" name="hora_checkin" required value="<?= date('H:i'); ?>">
+                <label for="hora_checkin">Horário de check-in</label>
+                <input type="time" id="hora_checkin" name="hora_checkin" value="<?= date('H:i'); ?>">
 
-                <button type="submit">Registrar Check-in</button>
-            </form>
-        <?php endif; ?>
+                <button type="submit" style="margin-top:16px;">Registrar check-in</button>
+            </div>
+        </form>
     </div>
 
     <!-- CHECK-INS EM ABERTO -->
     <div class="card">
         <h2>Check-ins em aberto</h2>
-        <?php if (empty($registrosAbertos)): ?>
+        <?php if (empty($abertos)): ?>
             <p>Não há check-ins em aberto.</p>
         <?php else: ?>
             <table>
@@ -240,24 +269,24 @@ $registrosFinalizados = $stmtFinalizados->fetchAll(PDO::FETCH_ASSOC);
                 </tr>
                 </thead>
                 <tbody>
-                <?php foreach ($registrosAbertos as $reg): ?>
+                <?php foreach ($abertos as $a): ?>
                     <tr>
-                        <td><?= htmlspecialchars($reg['id']) ?></td>
-                        <td><?= htmlspecialchars($reg['profissional']) ?></td>
-                        <td><?= htmlspecialchars($reg['sala']) ?></td>
+                        <td><?= (int)$a['id'] ?></td>
+                        <td><?= htmlspecialchars($a['profissional']) ?></td>
+                        <td><?= htmlspecialchars($a['sala']) ?></td>
                         <td>
                             <?php
-                            $dataBR = DateTime::createFromFormat('Y-m-d', $reg['data'])->format('d/m/Y');
-                            echo htmlspecialchars($dataBR);
+                            $dataBR = DateTime::createFromFormat('Y-m-d', $a['data']);
+                            echo $dataBR ? htmlspecialchars($dataBR->format('d/m/Y')) : htmlspecialchars($a['data']);
                             ?>
                         </td>
-                        <td><?= htmlspecialchars($reg['hora_checkin']) ?></td>
+                        <td><?= htmlspecialchars($a['hora_checkin']) ?></td>
                         <td>
                             <form method="post" class="actions-form">
                                 <input type="hidden" name="action" value="checkout">
-                                <input type="hidden" name="id" value="<?= (int)$reg['id'] ?>">
-                                <input class="small-input" type="time" name="hora_checkout" value="<?= date('H:i'); ?>">
-                                <button type="submit">Fazer Check-out</button>
+                                <input type="hidden" name="registro_id" value="<?= (int)$a['id'] ?>">
+                                <input type="time" name="hora_checkout" value="<?= date('H:i'); ?>">
+                                <button type="submit">Registrar check-out</button>
                             </form>
                         </td>
                     </tr>
@@ -267,14 +296,15 @@ $registrosFinalizados = $stmtFinalizados->fetchAll(PDO::FETCH_ASSOC);
         <?php endif; ?>
     </div>
 
-    <!-- REGISTROS FINALIZADOS EM GRUPOS DE 5 -->
+    <!-- ÚLTIMOS REGISTROS FINALIZADOS -->
     <div class="card">
-        <h2>Registros finalizados (em grupos de 5)</h2>
+        <h2>Últimos registros finalizados</h2>
         <p class="info">
-            Esta listagem mostra os registros finalizados em grupos de 5. Use os comandos abaixo para navegar para os próximos ou anteriores 5 registros.
+            Exibindo <strong><?= $porPagina ?></strong> registros por página.
+            Use os links abaixo para navegar entre os grupos de registros.
         </p>
-        <?php if ($totalFinalizados === 0): ?>
-            <p>Não há registros finalizados ainda.</p>
+        <?php if (empty($finalizados)): ?>
+            <p>Não há registros finalizados.</p>
         <?php else: ?>
             <table>
                 <thead>
@@ -289,50 +319,42 @@ $registrosFinalizados = $stmtFinalizados->fetchAll(PDO::FETCH_ASSOC);
                 </tr>
                 </thead>
                 <tbody>
-                <?php foreach ($registrosFinalizados as $reg): ?>
+                <?php foreach ($finalizados as $r): ?>
                     <tr>
-                        <td><?= htmlspecialchars($reg['id']) ?></td>
-                        <td><?= htmlspecialchars($reg['profissional']) ?></td>
-                        <td><?= htmlspecialchars($reg['sala']) ?></td>
+                        <td><?= (int)$r['id'] ?></td>
+                        <td><?= htmlspecialchars($r['profissional']) ?></td>
+                        <td><?= htmlspecialchars($r['sala']) ?></td>
                         <td>
                             <?php
-                            $dataBR = DateTime::createFromFormat('Y-m-d', $reg['data'])->format('d/m/Y');
-                            echo htmlspecialchars($dataBR);
+                            $dataBR = DateTime::createFromFormat('Y-m-d', $r['data']);
+                            echo $dataBR ? htmlspecialchars($dataBR->format('d/m/Y')) : htmlspecialchars($r['data']);
                             ?>
                         </td>
-                        <td><?= htmlspecialchars($reg['hora_checkin']) ?></td>
-                        <td><?= htmlspecialchars($reg['hora_checkout']) ?></td>
+                        <td><?= htmlspecialchars($r['hora_checkin']) ?></td>
+                        <td><?= htmlspecialchars($r['hora_checkout']) ?></td>
                         <td>
-                            <?php
-                            if ($reg['total_horas'] !== null) {
-                                echo htmlspecialchars(number_format((float)$reg['total_horas'], 2, ',', ''));
-                            } else {
-                                echo '-';
-                            }
-                            ?>
+                            <?= $r['total_horas'] !== null
+                                ? htmlspecialchars(number_format((float)$r['total_horas'], 2, ',', ''))
+                                : '' ?>
                         </td>
                     </tr>
                 <?php endforeach; ?>
                 </tbody>
             </table>
 
-            <p class="info" style="margin-top: 8px;">
-                Página <?= htmlspecialchars($paginaAtual) ?> de <?= htmlspecialchars($totalPaginas) ?>.
-            </p>
+            <?php if ($totalPaginas > 1): ?>
+                <div class="pagination">
+                    <?php if ($pagina > 1): ?>
+                        <a href="checkin.php?page=<?= $pagina - 1 ?>">&laquo; Anteriores</a>
+                    <?php endif; ?>
 
-            <div style="margin-top: 8px;">
-                <?php if ($temPaginaAnterior): ?>
-                    <a class="btn-link" href="checkin.php?page_finalizados=<?= $paginaAtual - 1 ?>">&laquo; Anteriores 5</a>
-                <?php endif; ?>
+                    <span>Página <?= $pagina ?> de <?= $totalPaginas ?></span>
 
-                <?php if ($temPaginaAnterior && $temProximaPagina): ?>
-                    &nbsp;|&nbsp;
-                <?php endif; ?>
-
-                <?php if ($temProximaPagina): ?>
-                    <a class="btn-link" href="checkin.php?page_finalizados=<?= $paginaAtual + 1 ?>">Próximos 5 &raquo;</a>
-                <?php endif; ?>
-            </div>
+                    <?php if ($pagina < $totalPaginas): ?>
+                        <a href="checkin.php?page=<?= $pagina + 1 ?>">Próximos &raquo;</a>
+                    <?php endif; ?>
+                </div>
+            <?php endif; ?>
         <?php endif; ?>
     </div>
 </div>
